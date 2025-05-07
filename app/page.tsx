@@ -10,7 +10,8 @@ import {
   type UseMutationOptions,
   type UseQueryResult
 } from '@tanstack/react-query';
-import { useAccount, useWriteContract, useWaitForTransactionReceipt, useEnsName } from 'wagmi'; // Added wagmi hooks
+import { useAccount, useWriteContract, useWaitForTransactionReceipt, useEnsName, useSwitchChain } from 'wagmi'; // Removed useNetwork
+import { base } from 'viem/chains'; // Import base chain definition
 import { erc20Abi } from './abis/erc20Abi'; // Moved ABI import
 import { morphoVaultAbi } from './abis/morphoVaultAbi'; // Moved ABI import
 import { parseUnits, type Address } from 'viem'; // Moved viem import
@@ -52,7 +53,8 @@ const GET_VAULT_APR = gql`
 export default function HomePage() {
   const { ready, authenticated, user, login, logout, getAccessToken } = usePrivy();
   const queryClient = useQueryClient();
-  const { address: userAddress, isConnected } = useAccount();
+  const { address: userAddress, isConnected, chain: activeChain } = useAccount();
+  const { chains, switchChainAsync, isPending: isSwitchingNetwork, error: switchChainError, status } = useSwitchChain();
 
   // Predefined goal titles
   const PREDEFINED_GOAL_TITLES = [
@@ -274,6 +276,32 @@ export default function HomePage() {
       setTxError("Invalid amount for deposit."); return;
     }
 
+    // Network Check
+    if (activeChain?.id !== base.id) {
+      setTxError(`Please switch to the ${base.name} network to continue.`);
+      try {
+        if (!switchChainAsync) {
+            setTxError("Network switching feature is not available. Please switch manually in your wallet.");
+            return;
+        }
+        setTxSuccessMessage(`Requesting network switch to ${base.name}...`);
+        await switchChainAsync({ chainId: base.id });
+        // After attempting switch, the app will re-render and activeChain should update.
+        // For a smoother UX, you might disable button until activeChain is correct or show loading.
+        // For now, we rely on user to retry if the switch was successful but this function execution already passed the check.
+        // A success message for switch might be good, or simply let the next action attempt it.
+        setTxSuccessMessage(`Switched to ${base.name}. You can now proceed.`);
+        // Important: We should return here and let user re-initiate the action or handle state to auto-continue.
+        // For simplicity, let user click again. Or, manage a state to auto-trigger after successful switch.
+        return; 
+      } catch (err: any) {
+        console.error("Failed to switch network:", err);
+        setTxError(err.message || "Failed to switch network. Please do it manually in your wallet.");
+        setIsLoadingTx(false); // Stop loading if switch fails
+        return;
+      }
+    }
+
     setIsLoadingTx(true);
     setTxError(null);
     setTxSuccessMessage("Requesting approval to spend USDC...");
@@ -427,6 +455,22 @@ export default function HomePage() {
     if (!user?.id) { 
       alert("Please log in to create a goal."); return;
     }
+    // Network check for initial deposit flow
+    if (activeChain?.id !== base.id && parseFloat(initialDepositAmount) > 0) {
+        setTxError(`Please switch to the ${base.name} network to make an initial deposit.`);
+        if (switchChainAsync) {
+            try {
+                setTxSuccessMessage(`Requesting network switch to ${base.name}...`);
+                await switchChainAsync({ chainId: base.id });
+                setTxSuccessMessage(`Switched to ${base.name}. Please try creating the goal again.`);
+            } catch (err:any) {
+                setTxError(err.message || "Failed to switch network. Please do it manually.");
+            }
+        } else {
+            alert(`Please switch to the ${base.name} network in your wallet before creating a goal with a deposit.`);
+        }
+        return;
+    }
 
     const finalTitle = title === CUSTOM_GOAL_VALUE ? customGoalTitle.trim() : title;
 
@@ -475,6 +519,23 @@ export default function HomePage() {
     if (!isConnected || !userAddress) {
       setTxError("Please connect your wallet to deposit."); return;
     }
+    // Network Check (already covered by initiateApproval, but good for direct calls if structure changes)
+    if (activeChain?.id !== base.id) {
+      setTxError(`Please switch to the ${base.name} network to deposit.`);
+      if (switchChainAsync) {
+        try {
+            setTxSuccessMessage(`Requesting network switch to ${base.name}...`);
+            await switchChainAsync({ chainId: base.id });
+            setTxSuccessMessage(`Switched to ${base.name}. Please try depositing again.`);
+        } catch (err:any) {
+            setTxError(err.message || "Failed to switch network. Please do it manually.");
+        }
+      } else {
+        alert(`Please switch to the ${base.name} network in your wallet to deposit.`);
+      }
+      return;
+    }
+
     const amount = parseFloat(depositValue);
     if (isNaN(amount) || amount <= 0) {
       setTxError("Please enter a valid positive amount to deposit."); return;
@@ -612,8 +673,10 @@ export default function HomePage() {
                 )} */}
               </div>
 
-              <button type="submit" disabled={isLoadingTx || isLoadingVaultAPR} className="button-primary" style={{marginTop: '1rem'}}>
-                {isLoadingTx ? (txSuccessMessage || 'Processing...') : (isLoadingVaultAPR ? 'Loading Vault Info...' : 'Create Goal & Deposit')}
+              <button type="submit" disabled={isLoadingTx || isLoadingVaultAPR || (isConnected && activeChain?.id !== base.id)} className="button-primary" style={{marginTop: '1rem'}}>
+                {isConnected && activeChain?.id !== base.id ? `Switch to ${base.name}` 
+                  : isLoadingTx ? (txSuccessMessage || 'Processing...') 
+                  : (isLoadingVaultAPR ? 'Loading Vault Info...' : 'Create Goal & Deposit')}
               </button>
               {/* Displaying transaction errors and successes */}
               {txError && <p style={{ color: 'red' }}>Error: {txError}</p>}
@@ -661,15 +724,17 @@ export default function HomePage() {
                         step="0.01"
                         max={remainingToFund > 0 ? remainingToFund.toFixed(USDC_DECIMALS) : undefined} // Set max attribute
                         style={{ width: '100%', padding: '0.5rem', boxSizing: 'border-box' }} 
-                        disabled={isLoadingTx && currentDepositingGoalId === goal.id || isFullyFunded}
+                        disabled={isLoadingTx && currentDepositingGoalId === goal.id || isFullyFunded || (isConnected && activeChain?.id !== base.id)}
                       />
                       <button 
                         onClick={() => handleIncreaseDeposit(goal.id, increaseDepositAmounts[goal.id] || '0')}
-                        disabled={isLoadingTx || !isConnected || isFullyFunded || !isIncreaseAmountValid }
+                        disabled={isLoadingTx || !isConnected || isFullyFunded || !isIncreaseAmountValid || (isConnected && activeChain?.id !== base.id) }
                         className="button-secondary"
                         style={{ width: '100%', padding: '0.75rem', boxSizing: 'border-box' }} 
                       >
-                        {isFullyFunded ? "Fully Funded" : (isLoadingTx && currentDepositingGoalId === goal.id ? 'Processing...' : 'Fund Goal')}
+                        {isConnected && activeChain?.id !== base.id ? `Switch to ${base.name}` 
+                        : isLoadingTx ? (txSuccessMessage || 'Processing...') 
+                        : (isLoadingVaultAPR ? 'Loading Vault Info...' : 'Create Goal & Deposit')}
                       </button>
                     </div>
                   </li>
